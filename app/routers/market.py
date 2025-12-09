@@ -1,0 +1,253 @@
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.exceptions import RequestValidationError
+from sqlalchemy.orm import Session
+from datetime import datetime, date
+from typing import Optional
+import logging
+from app.db import get_db
+from app.services.market_sync import (
+    fetch_and_save_market_data, 
+    get_realtime_market_prices,
+    fetch_realtime_komoditas,
+    fetch_realtime_produk_komoditas,
+    fetch_realtime_produk
+)
+from app.models.market_model import MarketPrice
+from app.schemas.market_schema import MarketPriceCreate
+
+router = APIRouter(prefix="/market", tags=["Market Data"])
+
+@router.get("/realtime")
+def get_realtime_prices():
+    """
+    Mengambil data harga pasar real-time langsung dari API Disdagkopukm.
+    Data tidak disimpan ke database, langsung dari API.
+    """
+    try:
+        result = get_realtime_market_prices()
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Gagal mengambil data real-time: {e}")
+
+@router.get("/realtime/komoditas")
+def get_komoditas_realtime():
+    """
+    Mengambil data komoditas real-time dari API.
+    """
+    try:
+        data = fetch_realtime_komoditas()
+        return {
+            "success": True,
+            "total": len(data),
+            "data": data,
+            "source": "https://disdagkopukm.wonosobokab.go.id/api/komoditas"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Gagal mengambil data komoditas: {e}")
+
+@router.get("/realtime/produk-komoditas")
+def get_produk_komoditas_realtime():
+    """
+    Mengambil data produk komoditas real-time dari API.
+    """
+    try:
+        data = fetch_realtime_produk_komoditas()
+        return {
+            "success": True,
+            "total": len(data),
+            "data": data,
+            "source": "https://disdagkopukm.wonosobokab.go.id/api/produk-komoditas"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Gagal mengambil data produk-komoditas: {e}")
+
+@router.get("/realtime/produk")
+def get_produk_realtime():
+    """
+    Mengambil data produk real-time dari API.
+    """
+    try:
+        data = fetch_realtime_produk()
+        return {
+            "success": True,
+            "total": len(data),
+            "data": data,
+            "source": "https://disdagkopukm.wonosobokab.go.id/api/produk"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Gagal mengambil data produk: {e}")
+
+@router.post("/sync")
+def sync_market_data():
+    """
+    Mengambil data dari API Disdagkopukm dan menyimpannya ke database lokal.
+    """
+    result = fetch_and_save_market_data()
+    return result
+
+@router.get("/list")
+def get_market_prices(
+    db: Session = Depends(get_db),
+    commodity: Optional[str] = Query(None, description="Filter berdasarkan nama komoditas"),
+    location: Optional[str] = Query(None, description="Filter berdasarkan lokasi pasar"),
+    start_date: Optional[date] = Query(None, description="Filter tanggal mulai"),
+    end_date: Optional[date] = Query(None, description="Filter tanggal akhir"),
+    limit: Optional[int] = Query(None, description="Jumlah data maksimal (kosongkan untuk ambil semua)")
+):
+    """
+    Mengambil data harga dari database lokal dengan filter.
+    Jika limit=None atau tidak diisi, akan mengambil semua data.
+    """
+    try:
+        query = db.query(MarketPrice)
+        
+        if commodity:
+            query = query.filter(MarketPrice.commodity_name.ilike(f"%{commodity}%"))
+        
+        if location:
+            query = query.filter(MarketPrice.market_location.ilike(f"%{location}%"))
+        
+        if start_date:
+            query = query.filter(MarketPrice.date >= start_date)
+        
+        if end_date:
+            query = query.filter(MarketPrice.date <= end_date)
+        
+        query = query.order_by(MarketPrice.date.desc())
+        
+        # Jika limit tidak diisi, ambil semua data
+        if limit is not None and limit > 0:
+            prices = query.limit(limit).all()
+        else:
+            prices = query.all()
+        
+        return {
+            "success": True,
+            "total": len(prices),
+            "data": [
+                {
+                    "price_id": p.price_id,
+                    "commodity_name": p.commodity_name,
+                    "market_location": p.market_location,
+                    "unit": p.unit,
+                    "price": p.price,
+                    "date": p.date.isoformat(),
+                    "created_at": p.created_at.isoformat() if p.created_at else None
+                }
+                for p in prices
+            ]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Gagal mengambil data: {e}")
+
+@router.post("/test-schema")
+def test_schema_validation(price_data: MarketPriceCreate):
+    """
+    Test endpoint untuk debugging schema validation
+    """
+    try:
+        logging.info(f"📊 Test schema received: {price_data.dict()}")
+        return {
+            "status": "success",
+            "message": "Schema validation passed",
+            "data": price_data.dict()
+        }
+    except Exception as e:
+        logging.error(f"❌ Schema validation error: {e}")
+        raise HTTPException(status_code=422, detail=f"Schema validation failed: {e}")
+
+@router.post("/add")
+def add_market_price(price_data: MarketPriceCreate, db: Session = Depends(get_db)):
+    """
+    Menyimpan data harga pasar ke database (pakai JSON body).
+    """
+    try:
+        # Log data yang diterima untuk debugging
+        logging.info(f"📊 Received price data: {price_data.dict()}")
+        
+        # Validasi tambahan
+        if not price_data.commodity_name.strip():
+            raise HTTPException(status_code=422, detail="commodity_name tidak boleh kosong")
+        if not price_data.market_location.strip():
+            raise HTTPException(status_code=422, detail="market_location tidak boleh kosong")
+        if price_data.price <= 0:
+            raise HTTPException(status_code=422, detail="price harus lebih besar dari 0")
+        
+        new_price = MarketPrice(
+            user_id=price_data.user_id or 1,  # Default ke admin
+            commodity_name=price_data.commodity_name.strip(),
+            market_location=price_data.market_location.strip(),
+            unit=price_data.unit.strip(),
+            price=float(price_data.price),
+            date=datetime.strptime(price_data.date, '%Y-%m-%d').date() if price_data.date else datetime.now().date(),
+            created_at=datetime.now()
+        )
+        
+        db.add(new_price)
+        db.commit()
+        db.refresh(new_price)
+        
+        logging.info(f"✅ Price data saved with ID: {new_price.price_id}")
+        return {
+            "status": "success", 
+            "message": "Data harga berhasil disimpan", 
+            "data": new_price.price_id
+        }
+        
+    except RequestValidationError as e:
+        logging.error(f"❌ Validation error: {e}")
+        raise HTTPException(status_code=422, detail=f"Validation error: {str(e)}")
+    except HTTPException:
+        raise  # Re-raise HTTPException as is
+    except Exception as e:
+        db.rollback()
+        logging.error(f"❌ Error saving price data: {e}")
+        raise HTTPException(status_code=500, detail=f"Gagal menyimpan data: {e}")
+
+@router.put("/update/{price_id}")
+def update_market_price(
+    price_id: int,
+    price_data: MarketPriceCreate,
+    db: Session = Depends(get_db)
+):
+    """
+    Update data harga pasar berdasarkan ID.
+    """
+    try:
+        existing = db.query(MarketPrice).filter(MarketPrice.price_id == price_id).first()
+        if not existing:
+            raise HTTPException(status_code=404, detail="Data tidak ditemukan")
+        
+        existing.commodity_name = price_data.commodity_name
+        existing.market_location = price_data.market_location
+        existing.unit = price_data.unit
+        existing.price = price_data.price
+        existing.date = price_data.date or existing.date
+        
+        db.commit()
+        db.refresh(existing)
+        return {"message": "Data berhasil diupdate", "data": existing.price_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Gagal update data: {e}")
+
+@router.delete("/delete/{price_id}")
+def delete_market_price(price_id: int, db: Session = Depends(get_db)):
+    """
+    Hapus data harga pasar berdasarkan ID.
+    """
+    try:
+        existing = db.query(MarketPrice).filter(MarketPrice.price_id == price_id).first()
+        if not existing:
+            raise HTTPException(status_code=404, detail="Data tidak ditemukan")
+        
+        db.delete(existing)
+        db.commit()
+        return {"message": "Data berhasil dihapus"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Gagal hapus data: {e}")
