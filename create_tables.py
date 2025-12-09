@@ -14,7 +14,7 @@ def create_all_tables():
         # Import all models to ensure they're registered with Base
         print("📚 Importing all models...")
         
-        # Create all tables
+        # Create all table
         Base.metadata.create_all(bind=engine)
         
         print("✅ All tables created successfully!")
