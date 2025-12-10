@@ -1,7 +1,7 @@
 from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
-    DATABASE_URL: str = "postgresql://admin:admin123@localhost:5432/escoscope"
+    DATABASE_URL: str = "postgres:admin123@localhost:5432/ecoscope_db"
     secret_key: str = "supersecretkey"
     auto_sync_enabled: bool = True
     sync_interval_hours: int = 24
